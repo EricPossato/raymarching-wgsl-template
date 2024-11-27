@@ -116,15 +116,15 @@ fn scene(p: vec3f) -> vec4f // xyz = color, w = distance
       let quat = quaternion_from_euler(shape.rotation.xyz + anim);
 
       let anim2 = animate(shape.transform_animated.xyz, animate_transform.xyz, animate_transform.w, uniforms[0]);
-      let p = p - shape.transform.xyz + anim2;
+      let p = p - shape.transform.xyz + anim2;  
 
       if ( shape_type > 1.0) // torus
       { 
-        d = 0.01;
+        d = sdf_torus(p,shape.radius.xy,quat); 
       }
       else if (shape_type > 0.0)// box
       {
-        d = 0.01;
+        d = sdf_round_box(p,shape.radius.xyz,shape.radius.w,quat);
       } 
       else  // sphere
       {
