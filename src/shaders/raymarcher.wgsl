@@ -85,6 +85,7 @@ fn transform_p(p: vec3f, option: vec2f) -> vec3f
   return repeat(p, vec3f(option.y));
 }
 
+
 fn scene(p: vec3f) -> vec4f // xyz = color, w = distance
 {
     var d = mix(100.0, p.y, uniforms[17]);
@@ -99,9 +100,45 @@ fn scene(p: vec3f) -> vec4f // xyz = color, w = distance
     for (var i = 0; i < all_objects_count; i = i + 1)
     {
       // get shape and shape order (shapesinfo)
+      var shapes_info = shapesinfob[i];
+      let shape_index = i32(shapes_info.y);
+      let shape_type = shapes_info.x; 
+
+      var shape = shapesb[shape_index];
+
+      let animate_transform = shape.animate_transform;
+      let animate_rotation = shape.animate_rotation;
+
       // shapesinfo has the following format:
       // x: shape type (0: sphere, 1: box, 2: torus)
       // y: shape index
+      let anim = animate(shape.animate_rotation.xyz, animate_rotation.xyz, animate_rotation.w, uniforms[0]);
+      let quat = quaternion_from_euler(shape.rotation.xyz + anim);
+
+      let anim2 = animate(shape.transform_animated.xyz, animate_transform.xyz, animate_transform.w, uniforms[0]);
+      let p = p - shape.transform.xyz + anim2;
+
+      if ( shape_type > 1.0) // torus
+      { 
+        d = 0.01;
+      }
+      else if (shape_type > 0.0)// box
+      {
+        d = 0.01;
+      } 
+      else  // sphere
+      {
+        d = sdf_sphere(p,shape.radius,quat);
+      }
+      
+      if (d < result.w)
+      {
+        result.w = d;
+        let res = vec4f(shape.color.xyz,d);
+        result = res;
+      }
+
+      
       // order matters for the operations, they're sorted on the CPU side
 
       // call transform_p and the sdf for the shape
@@ -124,27 +161,59 @@ fn march(ro: vec3f, rd: vec3f) -> march_output
 
   var depth = 0.0;
   var color = vec3f(0.0);
+  var dist = 10000;
   var march_step = uniforms[22];
   
-  for (var i = 0; i < max_marching_steps; i = i + 1)
+  for (var i = 0; i < max_marching_steps * 3; i = i + 1) // max_marching_steps * 3 to fix horizon issue
   {
       // raymarch algorithm
+      let p = ro + rd * depth;
       // call scene function and march
+      let res = scene(p);
+      let dist = res.w;
+      color = res.xyz;
       // if the depth is greater than the max distance or the distance is less than the epsilon, break
+      if (depth > MAX_DIST || dist < EPSILON)
+      {
+        return march_output(color,depth,false);
+      }
+      depth += dist;
   }
-
-  return march_output(color, depth, false);
+  return march_output(vec3f(0.0), MAX_DIST, false);
+  
 }
 
 fn get_normal(p: vec3f) -> vec3f
 {
-  return vec3f(0.0);
+    var epsilon = 0.0001;
+    var h = vec2f(epsilon, 0.0);
+    let dx = scene(p + h.xyy).w - scene(p - h.xyy).w;
+    let dy = scene(p + h.yxy).w - scene(p - h.yxy).w;
+    let dz = scene(p + h.yyx).w - scene(p - h.yyx).w;
+    return normalize(vec3f(dx, dy, dz));
 }
 
 // https://iquilezles.org/articles/rmshadows/
 fn get_soft_shadow(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, k: f32) -> f32
 {
-  return 0.0;
+  var res = 1.0;
+  var t = tmin;
+  let max_steps = 100;
+  var epsilon = 0.0001;
+
+  for (var i = 0; i < max_steps && t < tmax; i = i + 1)
+  {
+    let p = ro + rd * t;
+    let h = scene(p).w;
+
+    if (h < epsilon){
+      return 0.0;
+    }
+    res = min(res, k * h / t);
+    t += h; 
+  }
+
+  return clamp(res, 0.0, 1.0);
 }
 
 fn get_AO(current: vec3f, normal: vec3f) -> f32
@@ -178,7 +247,6 @@ fn get_ambient_light(light_pos: vec3f, sun_color: vec3f, rd: vec3f) -> vec3f
 
   return ambient;
 }
-
 fn get_light(current: vec3f, obj_color: vec3f, rd: vec3f) -> vec3f
 {
   var light_position = vec3f(uniforms[13], uniforms[14], uniforms[15]);
@@ -186,12 +254,10 @@ fn get_light(current: vec3f, obj_color: vec3f, rd: vec3f) -> vec3f
   var ambient = get_ambient_light(light_position, sun_color, rd);
   var normal = get_normal(current);
 
-  // calculate light based on the normal
-  // if the object is too far away from the light source, return ambient light
-  if (length(current) > uniforms[20] + uniforms[8])
-  {
-    return ambient;
-  }
+
+  let eps = uniforms[24];
+
+  var light_direction = normalize(light_position - current);
 
   // calculate the light intensity
   // Use:
@@ -199,7 +265,18 @@ fn get_light(current: vec3f, obj_color: vec3f, rd: vec3f) -> vec3f
   // - ambient occlusion (optional)
   // - ambient light
   // - object color
-  return ambient;
+
+  var shadow = get_soft_shadow(current + normal * eps,light_direction,eps,length(light_position - current),8.0);
+  var light_intensity = max(dot(normal, light_direction), 0.0);
+  var diffuse = light_intensity * obj_color * sun_color;
+  diffuse *= shadow;
+  var ao = get_AO(current, normal);
+
+  var color = ambient * obj_color;
+  color += diffuse;
+  color *= ao;
+
+  return color;
 }
 
 fn set_camera(ro: vec3f, ta: vec3f, cr: f32) -> mat3x3<f32>
@@ -211,9 +288,9 @@ fn set_camera(ro: vec3f, ta: vec3f, cr: f32) -> mat3x3<f32>
   return mat3x3<f32>(cu, cv, cw);
 }
 
-fn animate(val: vec3f, time_scale: f32, offset: f32) -> vec3f
-{
-  return vec3f(0.0);
+
+fn animate(val: vec3f, amplitude: vec3f, speed: f32, time: f32) -> vec3f {
+    return val + amplitude * (sin(speed * time));
 }
 
 @compute @workgroup_size(THREAD_COUNT, 1, 1)
@@ -256,7 +333,21 @@ fn render(@builtin(global_invocation_id) id : vec3u)
   // call march function and get the color/depth
   // move ray based on the depth
   // get light
-  var color = vec3f(1.0);
+  var march_output = march(ro, rd);
+  var depth = march_output.depth;
+  var color = march_output.color;
+
+  if (depth < MAX_DIST)
+  {
+    var current = ro + rd * depth;
+    color = get_light(current, march_output.color, rd);
+  }
+  else{
+    var light_position = vec3f(uniforms[13], uniforms[14], uniforms[15]);
+    var sun_color = int_to_rgb(i32(uniforms[16]));
+
+    color = get_ambient_light(light_position, sun_color, rd);
+    }
   
   // display the result
   color = linear_to_gamma(color);
